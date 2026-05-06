@@ -259,3 +259,64 @@ db.notifications.deleteMany({
     created_at: { $lt: new Date(Date.now() - 30*24*60*60*1000) } 
 });
 ```
+
+---
+
+# Stage 3: Query Optimization Analysis
+
+### 1. Analysis of the Query
+
+Yes, it will correctly fetch the data. However, it is extremely slow for a table with 5 million rows. Here is why:
+
+* We are fetching every single column (including potentially long message strings or metadata) even if the UI only needs the title and date. This puts a massive load on Disk I/O and memory.
+* If we only have an index on `studentID`, the database still has to manually scan through all notifications for that student to check `isRead = false`, and then perform an expensive Filesort in memory to order them by `createdAt`.
+*Computation Cost: Without a specific index covering all three fields, the CPU has to work overtime to sort thousands of rows for a single user request.
+
+### 2. The "Index Every Column" Advice
+Another developer suggested adding indexes on every column. This is bad advice.
+*Every time a new notification is created, the database would have to update every single index. This would make the system crawl during high-traffic periods.
+*5 million rows with 10+ indexes would consume a massive amount of disk space unnecessarily.
+*Too many indexes can actually confuse the database engine's optimizer, leading it to pick a less efficient path.
+
+### 3. My Solution
+I would implement a Compound Index on `(studentID, isRead, createdAt)`. This allows the DB to find the user, filter by read status, and retrieve the rows in the correct order instantly.
+
+```sql
+SELECT id, title, message, createdAt 
+FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt ASC;
+```
+---
+
+### 4. Placement Notification Query (Last 7 Days)
+
+```sql
+SELECT DISTINCT studentID
+FROM notifications
+WHERE notificationType = 'Placement'
+AND createdAt >= NOW() - INTERVAL 7 DAY;
+```
+*Note: Using `DISTINCT` ensures we don't get duplicate student IDs if a student received multiple placement alerts.*
+
+---
+
+# Stage 4: Scaling and Performance
+
+### The Problem
+Fetching notifications from the database on every single page load for 50,000 students is overwhelming the database. This causes high latency and a poor user experience because the DB is hitting its connection and I/O limits.
+
+### Proposed Solutions and Tradeoffs
+
+*   **Redis Caching**
+    *   Store the unread count and latest notifications in memory.
+    *   Improves speed significantly by avoiding disk reads.
+    *   Tradeoff: Cache needs to be updated every time a notification status changes.
+
+*   **Database Read Replicas**
+    *   Distribute fetch queries across multiple read-only database copies.
+    *   Offloads the main database for writing new notifications.
+    *   Tradeoff: Potential replication lag where data is slightly out of sync.
+
+---
+
