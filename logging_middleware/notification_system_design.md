@@ -176,3 +176,86 @@ All API interactions and real-time events **MUST** be logged using the `Logging_
 *   **Example**: `[INFO] [2024-05-06T15:20:00Z] GET /api/notifications - User: Authorized - Status: 200`
 
 ---
+# Stage 2
+
+## 1. Database Choice: MongoDB (NoSQL)
+For a notification system, MongoDB will be my choice as it can support data in any format
+
+### Rationale:
+*   **Schema Flexibility**: Notifications come from various sources (WhatsApp, Insta, OTPs) with different metadata. A document-oriented DB allows us to store these without rigid migrations.
+*   **High Write Throughput**: Notification systems are write-heavy (bursts of alerts). MongoDB is optimized for high-speed inserts.
+*   **Horizontal Scalability**: As the user base grows, MongoDB's sharding capabilities allow us to distribute data across multiple servers easily.
+
+---
+
+## 2. Database Schema
+We will use a `notifications` collection with the following structure:
+
+```javascript
+{
+  "_id": ObjectId("..."),
+  "user_id": "user_1",          // Indexed: Crucial for fetching user-specific alerts
+  "category": "urgent",           // Indexed: For filtering (reminder, otp, social, etc.)
+  "priority": "high",             // (critical, high, medium, low)
+  "channel": "push",              // (in-app, push, sms, email)
+  "title": "Security Alert",
+  "message": "New login detected from Mumbai.",
+  "is_read": false,               // Indexed: To quickly count unread notifications
+  "created_at": ISODate("..."),   // Indexed: For sorting by most recent
+  "metadata": {                   // Flexible object for source-specific data
+    "device_id": "IPHONE_15",
+    "location": "Mumbai, IN"
+  }
+}
+```
+
+---
+
+## 3. Scalability: Problems and Solutions
+
+### Potential Problems at Scale:
+1.  **Massive Data Volume**: Millions of notifications generated daily can lead to slow queries and high storage costs.
+2.  **Read Latency**: As the `notifications` collection grows into billions of records, simple `count` and `find` operations will slow down.
+3.  **Write Bursts**: Sudden spikes (e.g., a "Flash Sale" promotion) can overwhelm the database.
+
+### Proposed Solutions:
+1.  **TTL (Time To Live) Indexes**: Implement a TTL index on the `created_at` field (e.g., 30 days). This automatically deletes old notifications, keeping the database "lean" and performant.
+2.  **Indexing Strategy**: Create compound indexes like `{ user_id: 1, is_read: 1, created_at: -1 }` to ensure the "Fetch Unread" query is lightning fast.
+3.  **Database Sharding**: Use `user_id` as a shard key to distribute notifications across a cluster of servers.
+
+---
+
+## 4. Sample Queries (NoSQL)
+
+#### A. Fetching Latest Notifications
+```javascript
+db.notifications.find({ 
+    user_id: "user_789", 
+    is_read: false 
+})
+.sort({ created_at: -1 })
+.limit(20);
+```
+
+#### B. Getting Unread Count
+```javascript
+db.notifications.countDocuments({ 
+    user_id: "user_789", 
+    is_read: false 
+});
+```
+
+#### C. Marking All as Read
+```javascript
+db.notifications.updateMany(
+    { user_id: "user_789", is_read: false },
+    { $set: { is_read: true, updated_at: new Date() } }
+);
+```
+
+#### D. Deleting Old Notifications (Manual fallback to TTL)
+```javascript
+db.notifications.deleteMany({ 
+    created_at: { $lt: new Date(Date.now() - 30*24*60*60*1000) } 
+});
+```
