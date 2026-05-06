@@ -415,3 +415,18 @@ As new notifications arrive via SSE or polling, the system will:
 1.  Insert the new notification into the current list.
 2.  Re-run the sorting algorithm.
 3.  Keep only the top 10 and discard/relegate the rest to a "General" inbox.
+
+---
+
+# Stage 7: Frontend Implementation (React/Next.js)
+
+### 1. Architectural Overview
+The frontend is built using React to provide a fast, responsive, and SEO-friendly user interface. We utilize **Material UI (MUI) for professional, clean, and interactive components while maintaining a custom design system through native CSS where required.
+
+### 2. Core Features
+* Main Notification Dashboard: Displays all notifications in a scrollable list.
+* Priority Inbox View: A dedicated section/page that uses the weighted algorithm from Stage 6 to show the top "n" critical updates.
+*  Live Filtering: Users can filter by notification type (Placement, Result, Event, etc.) and read status.
+*Interactive Actions: "Mark as Read" buttons that trigger backend updates and real-time UI state changes.
+
+
