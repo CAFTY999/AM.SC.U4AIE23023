@@ -320,3 +320,98 @@ Fetching notifications from the database on every single page load for 50,000 st
 
 ---
 
+
+# Stage 5: Mass Notifications (Notify All)
+
+### 1. Shortcomings of the Existing Implementation
+The provided pseudocode uses a synchronous `for` loop to send 50,000 notifications. This approach has critical flaws:
+* Timeouts: An HTTP request cannot stay open for hours. The connection will close long before the 50,000th student is reached.
+*Rate Limiting: Sending 50,000 emails in a tight loop will likely cause the email provider to block our IP or trigger rate limits.
+*Main Thread Blocking: The server will be unresponsive to other users while this loop is running.
+*Lack of Fault Tolerance: If the process crashes at the 10,000th student, there is no easy way to resume without duplicate notifications or missing people.
+
+### 2. Handling Failures (The 200 Failed Students)
+If the `send_email` call fails midway for 200 students:
+*We don't have a mechanism to track which specific students failed to recieve the notification the only thing we can do it to manually parse the logs and find the students.
+*We need Retry Logic. By moving each notification to a "Job Queue," we can automatically retry failed tasks up to 3 times with "Exponential Backoff" (waiting longer between each try).
+
+### 3. Redesign for Reliability and Speed
+To make this reliable and fast, I would redesign the system using an Asynchronous Worker Architecture:
+1.Producer: The HR request only adds 50,000 tasks to a Message Queue (like Redis) and returns Success immediately.
+2Consumers (Workers): Multiple background workers pick up tasks from the queue and process them in parallel.
+3.Separation of Concerns: Saving to the DB and sending the email should be separate steps within the job or separate jobs entirely.
+    *DB operations are local and fast; email operations are external and slow. A failure in the email API shouldn't prevent the notification from being saved in the user's dashboard.
+
+### 4. Revised Pseudocode (Asynchronous Approach)
+
+```javascript
+// 1. The Main Controller (Triggered by HR)
+async function notify_all(student_ids, message) {
+    // Add all students to a background job queue
+    // This takes seconds, not hours.
+    await notificationQueue.addBulk(student_ids.map(id => ({
+        name: 'send_notification',
+        data: { student_id: id, message: message }
+    })));
+
+    return { status: "Queued", total: student_ids.length };
+}
+
+// 2. The Worker Processor (Runs in the background)
+worker.process('send_notification', async (job) => {
+    const { student_id, message } = job.data;
+
+    try {
+        // Step A: Save to DB (Persistent record)
+        await save_to_db(student_id, message);
+
+        // Step B: Send Email (External API)
+        // If this fails, the queue will automatically retry this specific job
+        await send_email(student_id, message);
+
+        // Step C: Push to App (Real-time SSE)
+        await push_to_app(student_id, message);
+
+    } catch (error) {
+        log_error(`Failed for ${student_id}: ${error.message}`);
+        throw error; // Re-throwing tells the queue to retry later
+    }
+});
+```
+
+---
+
+# Stage 6: Priority Inbox Implementation
+
+### 1. The Concept: Priority Inbox
+The Priority Inbox is designed to ensure that students see the most critical and relevant information first. Instead of a simple chronological list, we use a weighted algorithm to bubble up important updates like "Placement" drives and "Results" over general "Events".
+
+### 2. The Weightage System
+We assign a numerical weight to each notification type to define its relative importance:
+| Notification Type | Weight | Priority Level |
+| :--- | :--- | :--- |
+| **Placement** | 3 | High |
+| **Result** | 2 | Medium |
+| **Event** | 1 | Low |
+
+### 3. Sorting Algorithm
+The top `n` notifications are determined by a **Multi-Level Sort**:
+1.  **Primary Sort (Weight)**: Notifications are first grouped by their importance (e.g., all Placements appear above all Results).
+2.  **Secondary Sort (Recency)**: Within the same weight group, notifications are sorted by their `timestamp` in descending order (newest first).
+
+**Formula for Ranking:**
+`Score = (TypeWeight * 10^10) + UnixTimestamp`
+*By using a large multiplier for the weight, we ensure that an older "Placement" notification still appears above a brand new "Event" notification.*
+
+### 4. Implementation Details
+The implementation will:
+*   Fetch the raw data from the protected `evaluation-service/notifications` API.
+*   Apply the sorting logic using JavaScript's `.sort()` method.
+*   Slice the top 10 results for the display.
+*   Maintain performance by only sorting the unread set.
+
+### 5. Maintenance of Top 10
+As new notifications arrive via SSE or polling, the system will:
+1.  Insert the new notification into the current list.
+2.  Re-run the sorting algorithm.
+3.  Keep only the top 10 and discard/relegate the rest to a "General" inbox.
